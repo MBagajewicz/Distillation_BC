@@ -7,7 +7,7 @@ This repository contains a code that solves MESH equations for distillation colu
 
 ### Main Files:
 
-- `main.py`: Main file that implements the Bound Contraction algorithm.
+- `main_bound_contraction.py`: Main file that implements the Bound Contraction algorithm.
 - `resolve_LB.py`: Solves the Lower Bound (LB) model using a MILP model.
 - `resolve_UB.py`: Solves the Upper Bound (UB) model using an NLP model.
 - `problem_data.py`: Physical parameters and specifications of the distillation column.
