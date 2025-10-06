@@ -55,12 +55,11 @@ This repository contains a code that solves MESH equations for distillation colu
 1. Clone the repository or download the files.
 2. Make sure the GAMS solvers (CPLEX and CONOPT) are installed and licensed.
 
-### Configuração
-Modifique o arquivo problem_data.py para ajustar:
+### Configuration
+Modify the problem_data.py file to adjust:
 
-1. Número de intervalos de discretização (Card_L, Card_V, Card_T)
-2. Tolerância de convergência (Tol)
-
+1. Number of discretization intervals (Card_L, Card_V, Card_T)
+2. Convergence tolerance (Tol)
 
 
   
