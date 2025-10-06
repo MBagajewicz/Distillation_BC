@@ -1,0 +1,30 @@
+Bound Contraction 
+
+Variables:
+	Partition variables: Variables discretized into intervals.
+	Bound Contraction variables: Variables whose bounds will be contracted. (May differ from partition variables.)
+
+Parameters:	
+	γ: Convergence tolerance.
+	Card - 1: Initial number of partition intervals.
+	max_iter: Maximum allowed iterations.
+
+	1 Initialization:
+  	1.1 Set initial bounds for all variables.
+  	1.2 Partition selected variables into Card - 1intervals.
+  	1.3 Construct the lower bound (LB) model using one of the techniques (e.g., DPP1 (conforme metodologia proposta por Dédora)).
+  	1.4 Solve the LB model.
+  	1.5 Use the LB solution as a starting point to solve the original NLP problem and obtain the upper bound (UB).
+
+	2 Loop Principal (enquanto gap > ε e iteração < max_iter):
+  	2.1 Calculate gap = (UB - LB) / UB.
+  	2.2 If  gap ≤ ε: Return the optimal solution.
+  	2.3 Else: Perform Bound Contraction.
+  	2.3.1 Select a variable from the Bound Contraction variables set.
+  	2.3.2 Run the LB model while prohibiting the interval containing the UB solution for the selected variable (Step 2.3.1).
+  	2.3.3 If LB is infeasible or if LB is feasible but LB > UB:
+    	2.3.3.1 Eliminate all intervals except the prohibited one.
+    	2.3.3.2 Return to Step 2.3.1, selecting another variable.
+    	2.3.3.3 Repeat until all Bound Contraction variables are exhausted. Then return to Step 2.
+
+  3 If no intervals are eliminated and the stopping criterion is still unmet, increase the number of intervals and restart the process.
