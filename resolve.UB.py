@@ -1,6 +1,6 @@
 from pyomo.environ import *         
 
-from problem_data import (Ns, Nf, Pr, Feed, z_feed, T_feed, H_feed, kk,
+from problem_data import (Ns, Nf, Pr, Feed, z_feed, Reflux, H_feed, kk, 
                           liq_coeffs, vap_coeffs, Bott, Dist,
                           Qcond_upper, Qcond_lower, Qreb_upper, Qreb_lower,
                           x_upper, x_lower) 
@@ -180,6 +180,9 @@ def solve_UB(variable_bounds, UB_init):
     # Fix compositions as specified
     model.x[1, 1].fix(0.98)  # x11 is not a variable (fixed at 0.98)
     model.x[2, Ns].fix(0.98) # x2_Ns is not a variable (fixed at 0.98)
+
+    
+    model.reflux_constraint = Constraint(expr = model.L[1] == Reflux * Dist)
 
     # =============================================================================
     # Constraints
