@@ -1,8 +1,8 @@
 from pyomo.environ import *
 
-from calculate_chapel_variable import chapel_variable  
+from calculate_hat_discretized import hat_variable  
 
-from problem_data import (Ns, Nf, Pr, Feed, z_feed, T_feed, H_feed, kk,
+from problem_data import (Ns, Nf, Pr, Feed, z_feed, Reflux, H_feed, kk,
                           liq_coeffs, vap_coeffs, Bott, Dist,
                           Qcond_upper, Qcond_lower, Qreb_upper, Qreb_lower,
                           x_upper, x_lower) 
@@ -51,7 +51,7 @@ from problem_data import (Ns, Nf, Pr, Feed, z_feed, T_feed, H_feed, kk,
     ------
     - The model fixes the composition of benzene in the condenser (x[1,1]) to 0.98 and 
       the composition of toluene in the reboiler (x[2,Ns]) to 0.98.
-    - The model uses the chapel_variable function to generate discretization points.
+    - The model uses the hat_variable function to generate discretization points.
     - The solver used is CPLEX via GAMS.
 """
 
@@ -160,17 +160,17 @@ def solve_LB(variable_bounds, Card):
     # Print discretized variables
     # =============================================================================
     def init_T_hat(model, j, m):
-        return chapel_variable(m, M_card, [variable_bounds['T']['lower'][j-1], variable_bounds['T']['upper'][j-1]])
+        return hat_variable(m, M_card, [variable_bounds['T']['lower'][j-1], variable_bounds['T']['upper'][j-1]])
 
     def init_L_hat(model, j, n):
         if j < Ns:  # L is only defined for stages 1 to 16
-            return chapel_variable(n, N_card, [variable_bounds['L']['lower'][j-1], variable_bounds['L']['upper'][j-1]])
+            return hat_variable(n, N_card, [variable_bounds['L']['lower'][j-1], variable_bounds['L']['upper'][j-1]])
         else:
             return 0  # Default value for stage 17 (not used)
 
     def init_V_hat(model, j, p):
         if j > 1:  # V is only defined for stages 2 to 17
-            return chapel_variable(p, P_card, [variable_bounds['V']['lower'][j-1], variable_bounds['V']['upper'][j-1]])
+            return hat_variable(p, P_card, [variable_bounds['V']['lower'][j-1], variable_bounds['V']['upper'][j-1]])
         else:
             return 0  # Default value for stage 1 (not used)
 
@@ -181,6 +181,8 @@ def solve_LB(variable_bounds, Card):
     # Fix compositions as specified
     model.x[1, 1].fix(0.98)  # x11 is not a variable (fixed at 0.98)
     model.x[2, Ns].fix(0.98) # x2_Ns is not a variable (fixed at 0.98)
+
+    model.reflux_constraint = Constraint(expr = model.L[1] == Reflux * Dist)
 
     # =============================================================================
     # Constraints
