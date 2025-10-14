@@ -1,6 +1,6 @@
 
 """
-    CHAPEL VARIABLE DISCRETIZATION FUNCTION
+    Hat VARIABLE DISCRETIZATION FUNCTION
   
     Parameters:
     -----------
@@ -25,7 +25,7 @@
 
     Mathematical Formulation:
     -------------------------
-    The Chapel discretization uses linear interpolation:
+    The Hat discretization uses linear interpolation:
         value = lower_bound + (upper_bound - lower_bound) / (Card_D - 1) * (ord_d - 1)
     
     This creates a uniform grid where:
@@ -34,5 +34,5 @@
         - Intermediate points are equally spaced
     """
 
-def chapel_variable(ord_d, Card_D, bounds):
+def hat_variable(ord_d, Card_D, bounds):
     return bounds[0] + ((bounds[1] - bounds[0]) / (Card_D - 1)) * (ord_d - 1)
