@@ -1,7 +1,7 @@
 from pyomo.environ import *
 import numpy as np
 from problem_data import Ns, min_interval_width
-from calculate_hat_discretized import hat_variable
+from calculate_hat_discretization import hat_variable
 from resolve_LB import solve_LB
 
 def perform_bound_contraction(bounds, Card_var, results_LB, results_UB, Fobj_UB, Tol):
