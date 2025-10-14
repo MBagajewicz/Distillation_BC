@@ -1,6 +1,6 @@
 from pyomo.environ import *
 
-from calculate_hat_discretized import hat_variable  
+from calculate_hat_discretization import hat_variable  
 
 from problem_data import (Ns, Nf, Pr, Feed, z_feed, Reflux, H_feed, kk,
                           liq_coeffs, vap_coeffs, Bott, Dist,
