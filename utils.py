@@ -399,7 +399,7 @@ def print_partition_info(bounds, Card_var):
             upper = bounds[var_name]['upper'][stage]
             
             # Calculate discretization points
-            from calculate_hat_discretized import hat_variable
+            from calculate_hat_discretization import hat_variable
             points = [hat_variable(i, card, [lower, upper]) for i in range(1, card + 1)]
             
             print(f"  Stage {stage+1}: {points}")
