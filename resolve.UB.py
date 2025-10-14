@@ -1,356 +1,215 @@
-from pyomo.environ import *         
+from pyomo.environ import *
+import numpy as np
+from problem_data import Ns, min_interval_width
+from calculate_hat_discretization import hat_variable
+from resolve_LB import solve_LB
 
-from problem_data import (Ns, Nf, Pr, Feed, z_feed, Reflux, H_feed, kk, 
-                          liq_coeffs, vap_coeffs, Bott, Dist,
-                          Qcond_upper, Qcond_lower, Qreb_upper, Qreb_lower,
-                          x_upper, x_lower) 
-
-
-"""
-    SOLVE UPPER BOUND (UB) MODEL FOR DISTILLATION COLUMN OPTIMIZATION
+def perform_bound_contraction(bounds, Card_var, results_LB, results_UB, Fobj_UB, Tol):
+    """Executes the Bound Contraction algorithm"""
+    var_UB = extract_UB_solutions(results_UB)
+    binary_values = extract_binary_values(results_LB)
     
-    This function constructs and solves the Upper Bound (UB) NLP model for a 
-    benzene-toluene distillation column. The UB model represents the
-    nonlinear problem and provides an upper bound on the optimal solution.
+    # Dictionary to count how many stages did not undergo contraction for each variable
+    aux_var = {'L': 0, 'V': 0, 'T': 0}
     
-    The UB model uses the solution from the Lower Bound (LB) model as initial
-    point to warm-start the NLP solver.
-
-    Parameters:
-    -----------
-    variable_bounds : dict
-        Dictionary containing upper and lower bounds for decision variables.
-        Structure: {
-            'T': {'lower': [list], 'upper': [list]},  # Temperature bounds [K]
-            'L': {'lower': [list], 'upper': [list]},  # Liquid flow bounds [kmol/h]
-            'V': {'lower': [list], 'upper': [list]}   # Vapor flow bounds [kmol/h]
-        }
-        Each list has length Ns (number of stages)
-    
-    UB_init : dict
-        Dictionary containing initial values for all variables from LB solution.
-        Structure: {
-            'T': [list],      # Temperature initial values [K]
-            'L': [list],      # Liquid flow initial values [kmol/h]
-            'V': [list],      # Vapor flow initial values [kmol/h]
-            'x': {            # Composition initial values
-                1: [list],    # Benzene compositions
-                2: [list]     # Toluene compositions
-            },
-            'Qc': float,      # Condenser duty initial value [kJ/h]
-            'Qr': float       # Reboiler duty initial value [kJ/h]
-        }
-    
-    Returns:
-    --------
-    dict
-        Comprehensive results dictionary containing:
-        - termination_condition: Solver termination status
-        - objective_value: Optimal objective function value (Qr) [kJ/h]
-        - Qr: Reboiler duty [kJ/h]
-        - Qc: Condenser duty [kJ/h]
-        - T: Temperature profile by stage [K]
-        - L: Liquid flow rate profile by stage [kmol/h]
-        - V: Vapor flow rate profile by stage [kmol/h]
-        - x: Composition profiles by component and stage
-        - model: Pyomo model instance (optional)
-        - results: Solver results object (optional)
-    
-    Notes:
-    ------
-    The UB model implements the original nonlinear distillation column model:
-    1. Nonlinear Vapor-Liquid Equilibrium (VLE) using Antoine equation
-    2. Nonlinear component mass balances with equilibrium relationships
-    3. Nonlinear energy balances with temperature-dependent enthalpies
-    4. Total mass balances with feed stage consideration
-    5. Fixed compositions: x₁₁ = 0.98 (distillate), x₂_Ns = 0.98 (bottoms)
-    
-    Mathematical Approach:
-    ----------------------
-    - Represents the original MINLP problem as an NLP
-    - Uses exact nonlinear expressions for:
-        * VLE: K_i = exp(A_i - B_i/(T + C_i))/Pr
-        * Liquid enthalpy: polynomial function of temperature
-        * Vapor enthalpy: polynomial function of temperature
-    - Implements rigorous MESH equations (Mass, Equilibrium, Summation, Heat)
-    
-    
-    Solver Configuration:
-    ---------------------
-    - Solver: CONOPT via GAMS interface
-    - Problem Type: NLP (Nonlinear Programming)
-    - Objective: Minimize reboiler duty (Qr)
- 
-    Notes:
-    ------
-    - Stage numbering: 1 (condenser) to Ns (reboiler)
-    - Feed stage is at position Nf
-    - Components: 1 (Benzene), 2 (Toluene)
-    - Liquid flow L not defined at stage Ns (reboiler)
-    - Vapor flow V not defined at stage 1 (condenser)
-    - Pressure (Pr) is constant throughout the column
-    - Uses polynomial correlations for enthalpy calculations
-"""
-
-def solve_UB(variable_bounds, UB_init):
-
-    model = ConcreteModel()
-
-    # =============================================================================
-    # Sets
-    # =============================================================================
-    model.components = Set(initialize=[1, 2])       # Components (1=Benzene, 2=Toluene)
-    model.stages = Set(initialize=range(1, Ns+1))   # Ns stages (1=condenser, Ns=reboiler)
-
-
-    # =============================================================================
-    # Variables
-    # =============================================================================
-    # Flow rates - using limits from variable_bounds dictionary
-    model.L = Var(
-        model.stages - {Ns},
-        domain=NonNegativeReals,
-        bounds=lambda model, j: (
-            variable_bounds['L']['lower'][j-1] if j < Ns else None,
-            variable_bounds['L']['upper'][j-1] if j < Ns else None
-        )
-    )
-
-     # Initialize liquid flow rates (only stages 1 to 16)
-    for j in model.stages:
-        if j < Ns:  # Stages 1 to 16
-            model.L[j].value = UB_init['L'][j-1]
-
-    model.V = Var(
-        model.stages - {1},
-        domain=NonNegativeReals,
-        bounds=lambda model, j: (
-            variable_bounds['V']['lower'][j-1] if j > 1 else None,
-            variable_bounds['V']['upper'][j-1] if j > 1 else None
-        )
-    )
-
-    # Initialize vapor flow rates (only stages 2 to 17)
-    for j in model.stages:
-        if j > 1:  # Stages 2 to 17
-            model.V[j].value = UB_init['V'][j-1]
-
-    # Compositions
-    model.x = Var(
-        model.components, model.stages,
-        domain=NonNegativeReals,
-        bounds=(x_lower, x_upper)
-    )
-
-    # Initialize compositions
-    for i in model.components:
-        for j in model.stages:
-            model.x[i, j].value = UB_init['x'][i][j-1]
-
-    # Temperatures - using limits from variable_bounds dictionary
-    model.T = Var(
-        model.stages,
-        domain=NonNegativeReals,
-        bounds=lambda model, j: (
-            variable_bounds['T']['lower'][j-1],
-            variable_bounds['T']['upper'][j-1]
-        )
-    )
-
-    if UB_init is not None:
-        # Initialize temperatures
-        for j in model.stages:
-            model.T[j].value = UB_init['T'][j-1]
-
-    # Heat duties
-    model.Qc = Var(
-        domain=Reals,
-        bounds=(Qcond_lower, Qcond_upper)
-    )
-
-    model.Qr = Var(
-        domain=Reals,
-        bounds=(Qreb_lower, Qreb_upper)
-    )
-
-    # Initialize heat duties
-    model.Qc.value = UB_init['Qc']
-    model.Qr.value = UB_init['Qr']
-
-    # Fix compositions as specified
-    model.x[1, 1].fix(0.98)  # x11 is not a variable (fixed at 0.98)
-    model.x[2, Ns].fix(0.98) # x2_Ns is not a variable (fixed at 0.98)
-
-    
-    model.reflux_constraint = Constraint(expr = model.L[1] == Reflux * Dist)
-
-    # =============================================================================
-    # Constraints
-    # =============================================================================
-
-    # Composition normalization (excludes stages 1 and Ns due to fixations)
-    def norm_x_rule(model, j):
-        if j == 1 or j == Ns:
-            return Constraint.Skip
-        return sum(model.x[i, j] for i in model.components) == 1
-    model.norm_x_eq = Constraint(model.stages, rule=norm_x_rule)
-
-    # Material balances
-    def mass_balance_total(model, j):
-        if j == 1:  # Total condenser
-            return model.V[j+1] == model.L[j] + Dist
-        elif j == Ns:  # Partial reboiler
-            return model.L[j-1] == model.V[j] + Bott
-        else:  # Internal stages
-            if j == Nf:  # Feed stage
-                return model.L[j] + model.V[j] == model.L[j-1] + model.V[j+1] + Feed
-            else:
-                return model.L[j] + model.V[j] == model.L[j-1] + model.V[j+1]
-    model.mass_balance_total_eq = Constraint(model.stages, rule=mass_balance_total)
-
-    # Component balances
-    def mass_balance_component(model, i, j):
-        if j == 1:  # Condenser
-            return (model.V[j+1] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]) 
-                    == model.L[j] * model.x[i, j] + Dist * model.x[i, j])
-        elif j == Ns:  # Reboiler
-            return (model.L[j-1] * model.x[i, j-1] 
-                    == model.V[j] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                    + Bott * model.x[i, j])
-        else:  # Internal stages
-            if j == Nf:
-                return (model.L[j] * model.x[i, j] 
-                        + model.V[j] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                        == model.L[j-1] * model.x[i, j-1] 
-                        + model.V[j+1] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]) + 
-                        Feed * z_feed)
-            else:
-                return (model.L[j] * model.x[i, j] 
-                        + model.V[j] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                        == model.L[j-1] * model.x[i, j-1] 
-                        + model.V[j+1] * (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]))
-    model.mass_balance_component_eq = Constraint(model.components, model.stages, rule=mass_balance_component)
-
-    # =============================================================================
-    # Energy balances 
-    # =============================================================================
-
-    def h0_liq_expr(model, i, T_val):
-            return (liq_coeffs[i, 1] + 
-                    liq_coeffs[i, 2] * T_val + 
-                    liq_coeffs[i, 3] * T_val**2 + 
-                    liq_coeffs[i, 4] * T_val**3)        
-
-    def h0_vap_expr(model, i, T_val):
-            return (vap_coeffs[i, 1] + 
-                    vap_coeffs[i, 2] * T_val + 
-                    vap_coeffs[i, 3] * T_val**2 + 
-                    vap_coeffs[i, 4] * T_val**3)
-    
-    # Energy balances
-    def energy_balance(model, j):
-        if j == 1:  # Condenser
-            return model.V[j+1] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]) 
-                * h0_vap_expr(model, i, model.T[j+1]) for i in model.components
-            ) == (model.L[j] + Dist) * sum(
-        model.x[i, j] * h0_liq_expr(model, i, model.T[j]) for i in model.components
-        ) + model.Qc
+    for var_name in ['L', 'V', 'T']:
+        valid_stages = get_valid_stages(var_name)
         
-        elif j == Ns:  # Reboiler
-            return model.L[j-1] * sum(
-        model.x[i, j-1] * h0_liq_expr(model, i, model.T[j-1]) for i in model.components
-        ) + model.Qr == model.V[j] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                * h0_vap_expr(model, i, model.T[j]) for i in model.components
-            ) + Bott * sum(
-        model.x[i, j] * h0_liq_expr(model, i, model.T[j]) for i in model.components
-        )
-        
-        else:  # Internal stages
-            if j == Nf:
-                return (model.L[j] * sum(
-        model.x[i, j] * h0_liq_expr(model, i, model.T[j]) for i in model.components
-        ) + model.V[j] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                * h0_vap_expr(model, i, model.T[j]) for i in model.components
-            ) == 
-                        model.L[j-1] * sum(
-        model.x[i, j-1] * h0_liq_expr(model, i, model.T[j-1]) for i in model.components
-        ) + model.V[j+1] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]) 
-                * h0_vap_expr(model, i, model.T[j+1]) for i in model.components
-            ) +  Feed * H_feed)
+        for stage in valid_stages:
+            if should_skip_stage(var_name, stage):
+                continue
+                
+            current_width = get_interval_width(bounds, var_name, stage)
+            if current_width < min_interval_width:
+                print(f"Interval for {var_name} at stage {stage+1} is already too narrow ({current_width:.6f}). Do not contract.")
+                continue
             
-            else:
-                return (model.L[j] * sum(
-        model.x[i, j] * h0_liq_expr(model, i, model.T[j]) for i in model.components
-        ) + model.V[j] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j] + kk[i, 3])))/Pr) * model.x[i, j]) 
-                * h0_vap_expr(model, i, model.T[j]) for i in model.components
-            ) == 
-                        model.L[j-1] * sum(
-        model.x[i, j-1] * h0_liq_expr(model, i, model.T[j-1]) for i in model.components
-        ) + model.V[j+1] * sum(
-                (((exp(kk[i, 1] - kk[i, 2]/(model.T[j+1] + kk[i, 3])))/Pr) * model.x[i, j+1]) 
-                * h0_vap_expr(model, i, model.T[j+1]) for i in model.components
-            ))
-    model.energy_balance = Constraint(model.stages, rule=energy_balance)
-
-
-    # Objective function
-    def objective_rule(model):
-        return model.Qr
-    model.obj = Objective(rule=objective_rule, sense=minimize)
-
-
-    # =============================================================================
-    # Solve the model
-    # =============================================================================
-    solver = SolverFactory('gams')
-    solver.options['solver'] = 'conopt'
-    results = solver.solve(model)
-
-
-    # =============================================================================
-    # Collect and return results
-    # =============================================================================
-    # Check if solution was found
-    if results.solver.termination_condition == (TerminationCondition.optimal) or (TerminationCondition.locallyOptimal):
-        # Collect values of main variables
-        termination_condition = results.solver.termination_condition
-        Qr_val = value(model.Qr)
-        Qc_val = value(model.Qc)
-        
-        # Collect values by stage
-        T_values = [value(model.T[j]) for j in model.stages]
-        L_values = [value(model.L[j]) if j in model.L else float('nan') for j in model.stages]
-        V_values = [value(model.V[j]) if j in model.V else float('nan') for j in model.stages]
-        
-        # Collect compositions
-        x_values = {}
-        for i in model.components:
-            x_values[i] = [value(model.x[i, j]) for j in model.stages]
+            # Performs bound contraction for this variable and stage
+            contraction_occurred = contract_bounds(bounds, Card_var, var_name, stage, 
+                                                 var_UB, binary_values, Fobj_UB, Tol)
             
-        # Return dictionary with all results
-        results_dict = {
-            'termination_condition': termination_condition,
-            'objective_value': Qr_val,
-            'Qr': Qr_val,
-            'Qc': Qc_val,
-            'T': T_values,
-            'L': L_values,
-            'V': V_values,
-            'x': x_values,
-            'model': model,  # Optional: return complete model if needed
-            'results': results  # Optional: return complete results
-        }
- 
-        return results_dict
-        
+            # If no contraction occurred, increment the counter
+            if not contraction_occurred:
+                aux_var[var_name] += 1
+    
+    return aux_var
+
+def extract_UB_solutions(results_UB):
+    """Extracts UB solutions for use in Bound Contraction"""
+    return {
+        'T': results_UB['T'],
+        'L': results_UB['L'],
+        'V': results_UB['V'],
+    }
+
+def extract_binary_values(results_LB):
+    """Extracts binary values from the LB solution"""
+    return {
+        'T': results_LB['lambda'],
+        'L': results_LB['omega'],
+        'V': results_LB['rho']
+    }
+
+def get_valid_stages(var_name):
+    """Returns valid stages for a variable"""
+    if var_name == 'T':
+        return range(Ns)  # All stages for temperature
+    elif var_name == 'L':
+        return range(Ns - 1)  # Stages 1 to 16 for liquid
+    elif var_name == 'V':
+        return range(1, Ns)  # Stages 2 to 17 for vapor
+    return []
+
+def should_skip_stage(var_name, stage):
+    """Checks if a stage should be skipped"""
+    if var_name == 'V' and stage == 0:  # V not defined in stage 1
+        return True
+    if var_name == 'L' and stage == Ns - 1:  # L not defined in stage 17
+        return True
+    return False
+
+def get_interval_width(bounds, var_name, stage):
+    """Calculates the current interval width"""
+    lower = bounds[var_name]['lower'][stage]
+    upper = bounds[var_name]['upper'][stage]
+    return upper - lower
+
+def contract_bounds(bounds, Card_var, var_name, stage, var_UB, binary_values, Fobj_UB, Tol):
+    """Performs bound contraction for a specific variable and stage"""
+    
+    # Saves original bounds
+    orig_lower = bounds[var_name]['lower'][stage]
+    orig_upper = bounds[var_name]['upper'][stage]
+    
+    # Gets current partition
+    lower = orig_lower
+    upper = orig_upper
+    card = Card_var[var_name]
+    points = [hat_variable(i, card, [lower, upper]) for i in range(1, card + 1)]
+    
+    # Gets UB value for this variable and stage
+    ub_val = var_UB[var_name][stage]
+    
+    # Gets binary vector for this stage
+    bin_vec = binary_values.get(var_name, {})
+    lambda_stage_value = bin_vec.get(stage + 1, None)
+    
+    # Determines the prohibited index
+    prohibited_index_idx = find_prohibited_index(lambda_stage_value, card, Tol)
+    
+    if prohibited_index_idx is None:
+        return False  # Not enough information, no contraction
+    
+    # Calculates distances to determine which side to contract
+    P_initial = points[0]
+    P_final = points[-1]
+    dist_initial = abs(P_initial - ub_val)
+    dist_final = abs(P_final - ub_val)
+    
+    # Decides which side to contract
+    if dist_initial <= dist_final:
+        # Eliminates extremes near the beginning
+        if (card - 2) < len(points) and (card - 2) >= 0:
+            bounds[var_name]['lower'][stage] = points[card - 2]
+        else:
+            bounds[var_name]['lower'][stage] = points[1] if len(points) > 1 else points[0]
     else:
-        #print(f"Solver did not converge. Termination condition: {results.solver.termination_condition}")
-        return {
-            'termination_condition': results.solver.termination_condition,
-            'error': 'Solver did not converge to an optimal solution'
-        }
+        # Eliminates extremes near the end
+        bounds[var_name]['upper'][stage] = points[1] if len(points) > 1 else points[-1]
+    
+    # Solves LB with new bounds
+    print(f"Executing LB for {var_name} at stage {stage+1} with new bounds: [{bounds[var_name]['lower'][stage]:.6f}, {bounds[var_name]['upper'][stage]:.6f}]")
+    
+    results_LB_new = solve_LB(bounds, Card_var)
+    Fobj_LB_new = results_LB_new.get('objective_value', None)
+    term_LB_new = results_LB_new.get('termination_condition', None)
+    
+    # Checks optimality conditions
+    def is_optimal_flag(flag):
+        try:
+            return ((flag == TerminationCondition.optimal) 
+                    or (flag == TerminationCondition.locallyOptimal) 
+                    or (str(flag).lower().find('optimal') != -1))
+        except:
+            return str(flag).lower() in ('optimal', 'locallyoptimal')
+    
+    def is_infeasible_flag(flag):
+        try:
+            return ((flag == TerminationCondition.infeasible) 
+                    or (str(flag).lower().find('infeasible') != -1))
+        except:
+            return str(flag).lower() in ('infeasible', 'locallyinfeasible')
+    
+    contraction_occurred = False
+    
+    # Decision logic based on LB results
+    if Fobj_LB_new is not None and Fobj_UB is not None and (Fobj_LB_new < Fobj_UB):
+        # LB is feasible and LB < UB → NO CONTRACTION
+        print(f"LB feasible and LB < UB → NO CONTRACTION for {var_name} at stage {stage+1}")
+        # Restores original bounds
+        bounds[var_name]['lower'][stage] = orig_lower
+        bounds[var_name]['upper'][stage] = orig_upper
+        contraction_occurred = False
+    
+    elif is_infeasible_flag(term_LB_new) or (Fobj_LB_new is not None and Fobj_UB is not None and (Fobj_LB_new > Fobj_UB)):
+        # LB is infeasible or LB > UB → CONTRACTION (keeps only the prohibited interval)
+        print(f"LB infeasible or LB > UB → CONTRACTION for {var_name} at stage {stage+1}")
+        
+        # Reverts the change and keeps only the prohibited interval
+        if dist_initial <= dist_final:
+            # Restores lower and adjusts upper to the appropriate point
+            bounds[var_name]['lower'][stage] = orig_lower
+            if (card - 2) < len(points):
+                bounds[var_name]['upper'][stage] = points[card - 2]
+        else:
+            bounds[var_name]['upper'][stage] = orig_upper
+            if 1 < len(points):
+                bounds[var_name]['lower'][stage] = points[1]
+        
+        contraction_occurred = True
+    
+    else:
+        # Unexpected case, restores original bounds
+        bounds[var_name]['lower'][stage] = orig_lower
+        bounds[var_name]['upper'][stage] = orig_upper
+        contraction_occurred = False
+    
+    return contraction_occurred
+
+def find_prohibited_index(lambda_stage_value, card, Tol):
+    """Finds the prohibited interval index based on binary values"""
+    if lambda_stage_value is None:
+        return None
+    
+    # If lambda_stage_value is a list (binary vector)
+    if isinstance(lambda_stage_value, (list, tuple, np.ndarray)):
+        vec = list(lambda_stage_value)
+        # Finds positions where lambda != 1 (with tolerance)
+        indices = [i + 1 for i, v in enumerate(vec) if (v >= 1 + Tol) or (v <= 1 - Tol)]
+        if len(indices) > 0:
+            return indices[0]
+    else:
+        # Case where LB returns only an integer indicating the active partition
+        try:
+            v = int(lambda_stage_value)
+            if 1 <= v <= card:
+                return v
+        except:
+            return None
+    
+    return None
+
+def check_all_stages_contracted(aux_var):
+    """Checks if any variable did not undergo contraction in any stage"""
+    for var_name in ['L', 'V', 'T']:
+        num_valid_stages = Ns - 1 if var_name in ['L', 'V'] else Ns
+        if aux_var[var_name] == num_valid_stages:
+            print(f"No contraction occurred for {var_name} in any stage")
+            return var_name
+    return None
+
+def increase_partition(Card_var, var_name):
+    """Increases the number of partitions for a variable"""
+    Card_var[var_name] += 1
+    print(f"Increased partitions for {var_name}: Card_{var_name} = {Card_var[var_name]}")
+    return Card_var[var_name]
